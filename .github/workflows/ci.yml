@@ -1,106 +1,79 @@
-name: CI/CD StockAlert
+# ============================================================
+#  CI Pipeline — StockAlert TP B3 DevOps
+# ============================================================
+#
+# DÉCLENCHEURS :
+#   - Push sur main
+#   - Pull Request vers main
+#
+# JOBS (dans l'ordre d'exécution) :
+#
+#   1. test  → installe les dépendances et lance les tests unitaires
+#              Si ce job échoue, la pipeline s'arrête ici.
+#
+#   2. lint  → attend que "test" soit VERT, puis vérifie le style
+#              du code avec ESLint.
+#              Logique : on ne vérifie le style que si le code
+#              fonctionne déjà correctement.
+# ============================================================
+
+name: CI
 
 on:
   push:
-    branches: [main, staging]
-    tags:
-      - "v*"
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
 
-  # ── JOB 1 : TESTS ─────────────────────────────────────────────────
+  # ── JOB 1 : Tests unitaires ────────────────────────────────────────
+  # Premier rempart : si les tests échouent,
+  # on arrête tout — lint ne démarre pas.
+  # ──────────────────────────────────────────────────────────────────
   test:
     name: Tests
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Installer Node.js 18
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: "18"
+          cache: "npm"
 
-      - name: Installer les dépendances
+      - name: Install dependencies
         run: npm install
 
-      - name: Lancer les tests
+      - name: Run unit tests
         run: npm test
 
-  # ── JOB 2 : LINT ──────────────────────────────────────────────────
+  # ── JOB 2 : Lint (style du code) ──────────────────────────────────
+  # "needs: test" = ce job ne démarre QUE si le job "test" a réussi.
+  # Si "test" est rouge → "lint" est annulé automatiquement par GitHub.
+  # ──────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
     needs: test
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Installer Node.js 18
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: "18"
+          cache: "npm"
 
-      - name: Installer les dépendances
+      - name: Install dependencies
         run: npm install
 
-      - name: Vérifier le style du code
+      - name: Check code style (ESLint)
         run: npm run lint
-
-  # ── JOB 3 : BUILD + TRIVY + PUSH ──────────────────────────────────
-  # Déclenché sur tag v* OU push staging — pas sur push main
-  build:
-    name: Build, Scan & Push
-    runs-on: ubuntu-latest
-    needs: [test, lint]
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/staging'
-    steps:
-      - uses: actions/checkout@v4
-
-      # Définir le tag de l'image :
-      # tag v1.0.0 → stockalert:v1.0.0
-      # branche staging → stockalert:staging
-      - name: Définir le tag image
-        id: vars
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=staging" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Builder l'image Docker
-        run: |
-          docker build \
-            -t ${{ secrets.DOCKER_USERNAME }}/stockalert:${{ steps.vars.outputs.tag }} .
-
-      # Scan Trivy — bloque si CRITICAL détectée
-      # Le push ne s'exécute PAS si Trivy échoue
-      - name: Scan de sécurité Trivy
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            ghcr.io/aquasecurity/trivy:latest image \
-            --exit-code 1 \
-            --severity CRITICAL \
-            ${{ secrets.DOCKER_USERNAME }}/stockalert:${{ steps.vars.outputs.tag }}
-
-      - name: Push sur Docker Hub
-        run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login \
-            -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-          docker push ${{ secrets.DOCKER_USERNAME }}/stockalert:${{ steps.vars.outputs.tag }}
-
-  # ── JOB 4 : DEPLOY STAGING ────────────────────────────────────────
-  # Uniquement sur push vers la branche staging
-  deploy-staging:
-    name: Deploy → Staging
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/staging'
-    steps:
-      - name: Déployer en staging
-        run: |
-          echo "🔵 Déploiement en staging"
-          echo "Image : ${{ secrets.DOCKER_USERNAME }}/stockalert:staging"
-          echo "✅ Staging mis à jour"
