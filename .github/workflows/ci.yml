@@ -2,23 +2,19 @@
 #  CI Pipeline — StockAlert TP B3 DevOps
 # ============================================================
 #
-# DÉCLENCHEURS :
-#   - Push sur main
-#   - Pull Request vers main
-#   - Push d'un tag v* (ex: v1.0.0)
+# MATRICE DE DÉCLENCHEMENT :
 #
-# JOBS (dans l'ordre d'exécution) :
+#   push main    → test + lint
+#   push staging → test + lint + build + deploy-staging
+#   tag v*       → test + lint + build
 #
-#   1. test  → installe les dépendances et lance les tests unitaires
-#              Si ce job échoue, la pipeline s'arrête ici.
-#
-#   2. lint  → attend que "test" soit VERT, puis vérifie le style
-#              du code avec ESLint.
-#
-#   3. build → attend que "test" ET "lint" soient VERTS.
-#              SE DÉCLENCHE UNIQUEMENT sur un tag v*.
-#              Builder l'image Docker et la pusher sur Docker Hub
-#              avec le tag git comme tag Docker (ex: v1.0.0).
+# JOBS :
+#   1. test          → tests unitaires (bloque tout si rouge)
+#   2. lint          → style ESLint (nécessite test vert)
+#   3. build         → Build → Trivy → Push Docker Hub
+#                      (tags v* OU branche staging)
+#   4. deploy-staging → simulation de déploiement staging
+#                      (branche staging UNIQUEMENT)
 # ============================================================
 
 name: CI
@@ -27,6 +23,7 @@ on:
   push:
     branches:
       - main
+      - staging
     tags:
       - "v*"
   pull_request:
@@ -86,20 +83,21 @@ jobs:
 
   # ── JOB 3 : Build → Scan Trivy → Push ────────────────────────────
   # "needs: [test, lint]" = attend que les 2 jobs soient VERTS.
-  # "if: startsWith(...)" = uniquement sur un tag v*.
   #
-  # Ordre des étapes :
-  #   1. Build local  — image chargée dans le daemon Docker du runner
-  #                     (pas encore sur Docker Hub)
-  #   2. Trivy scan   — analyse l'image pour des CVE CRITICAL
-  #                     exit-code 1 → le job échoue, le push n'a pas lieu
-  #   3. Push         — n'arrive ici QUE si Trivy n'a rien trouvé de critique
+  # Condition : tourne sur tag v* OU sur push staging.
+  #   tag v*       → image taguée avec le numéro de version (ex: v1.0.2)
+  #   push staging → image taguée "staging"
+  #   push main    → ce job n'apparaît pas du tout
+  #
+  # Dans les deux cas github.ref_name donne le bon tag Docker :
+  #   ref_name sur tag v1.0.2  → "v1.0.2"
+  #   ref_name sur branche     → "staging"
   # ──────────────────────────────────────────────────────────────────
   build:
     name: Build, Scan & Push Docker image
     runs-on: ubuntu-latest
     needs: [test, lint]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/staging'
 
     steps:
       - name: Checkout code
@@ -139,3 +137,27 @@ jobs:
       # L'image est déjà dans le daemon local → simple `docker push`.
       - name: Push to Docker Hub
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/stockalert:${{ github.ref_name }}
+
+  # ── JOB 4 : Deploy Staging ────────────────────────────────────────
+  # "needs: build" = ne démarre qu'après un build réussi.
+  #
+  # "if: github.ref == 'refs/heads/staging'" = condition clé :
+  #   ce job tourne UNIQUEMENT sur push staging.
+  #   Sur un tag v* → build tourne mais deploy-staging est skippé.
+  #   Sur push main → ce job n'apparaît pas.
+  #
+  # En production ce step ferait un SSH, un kubectl apply, un
+  # docker-compose pull+up, etc. Ici on simule avec un echo.
+  # ──────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/staging'
+
+    steps:
+      - name: Deploy staging image
+        run: |
+          echo "Deploying ${{ secrets.DOCKERHUB_USERNAME }}/stockalert:staging"
+          echo "Environment : staging"
+          echo "Deployment successful"
