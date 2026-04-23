@@ -84,19 +84,19 @@ jobs:
       - name: Check code style (ESLint)
         run: npm run lint
 
-  # ── JOB 3 : Build & Push Docker image ─────────────────────────────
+  # ── JOB 3 : Build → Scan Trivy → Push ────────────────────────────
   # "needs: [test, lint]" = attend que les 2 jobs soient VERTS.
+  # "if: startsWith(...)" = uniquement sur un tag v*.
   #
-  # "if: startsWith(github.ref, 'refs/tags/v')" = condition clé :
-  #   ce job est DÉFINI dans le workflow mais GitHub ne le démarre
-  #   que si le déclencheur est un tag commençant par "v".
-  #   Sur un push main ou une PR → ce job n'apparaît même pas.
-  #
-  # Le tag Docker = le tag git (github.ref_name).
-  #   Ex: git tag v1.0.0 → image publiée sous :v1.0.0 sur Docker Hub
+  # Ordre des étapes :
+  #   1. Build local  — image chargée dans le daemon Docker du runner
+  #                     (pas encore sur Docker Hub)
+  #   2. Trivy scan   — analyse l'image pour des CVE CRITICAL
+  #                     exit-code 1 → le job échoue, le push n'a pas lieu
+  #   3. Push         — n'arrive ici QUE si Trivy n'a rien trouvé de critique
   # ──────────────────────────────────────────────────────────────────
   build:
-    name: Build & Push Docker image
+    name: Build, Scan & Push Docker image
     runs-on: ubuntu-latest
     needs: [test, lint]
     if: startsWith(github.ref, 'refs/tags/v')
@@ -105,18 +105,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Authentification Docker Hub via les secrets GitHub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Build l'image et la pousse avec le tag git comme tag Docker
-      # github.ref_name vaut exactement le nom du tag (ex: "v1.0.0")
-      - name: Build and push Docker image
+      # ÉTAPE 1/3 — Build uniquement en local
+      # "load: true"  → charge l'image dans le daemon Docker du runner
+      # "push: false" → pas de push encore, Trivy doit d'abord valider
+      - name: Build Docker image (local only)
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
+          push: false
+          load: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/stockalert:${{ github.ref_name }}
+
+      # ÉTAPE 2/3 — Scan de sécurité Trivy
+      # Analyse les packages OS (Alpine) et npm dans l'image locale.
+      # exit-code: "1" → ce job échoue si au moins une CVE CRITICAL est trouvée.
+      # L'étape suivante (push) ne se lance pas si ce step échoue.
+      - name: Security scan with Trivy
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/stockalert:${{ github.ref_name }}
+          exit-code: "1"
+          severity: "CRITICAL"
+          format: "table"
+
+      # ÉTAPE 3/3 — Push sur Docker Hub
+      # Ce step n'est atteint QUE si Trivy n'a détecté aucune CVE CRITICAL.
+      # L'image est déjà dans le daemon local → simple `docker push`.
+      - name: Push to Docker Hub
+        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/stockalert:${{ github.ref_name }}
