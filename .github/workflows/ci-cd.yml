@@ -1,0 +1,118 @@
+# ============================================================
+#  CI/CD Pipeline — StockAlert TP B3 DevOps
+# ============================================================
+#
+# DÉCLENCHEURS :
+#   - Push sur main ou staging
+#   - Pull Request vers main ou staging
+#
+# JOBS :
+#   1. test  → installe les dépendances, lint, tests unitaires
+#   2. build → build & push de l'image Docker sur Docker Hub
+#              (uniquement sur push, pas sur PR)
+#
+# STRATÉGIE DE TAGS DOCKER :
+#   - branche main    → tags : "latest"  + "main-<sha court>"
+#   - branche staging → tags : "staging" + "staging-<sha court>"
+# ============================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  pull_request:
+    branches:
+      - main
+      - staging
+
+jobs:
+  # ──────────────────────────────────────────────
+  # JOB 1 : Tests & Lint
+  # ──────────────────────────────────────────────
+  # Ce job tourne sur CHAQUE push et chaque PR.
+  # Objectif : vérifier que le code est correct
+  # AVANT de construire et publier une image.
+  # Si ce job échoue, le job "build" ne se lance pas.
+  # ──────────────────────────────────────────────
+  test:
+    name: Tests & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Récupère le code source du repo
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Configure Node.js 18 (même version que le Dockerfile)
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      # 3. Installe TOUTES les dépendances (y compris devDependencies)
+      #    car eslint est une devDependency nécessaire au lint
+      - name: Install dependencies
+        run: npm install
+
+      # 4. Vérifie le style du code avec ESLint
+      - name: Lint
+        run: npm run lint
+
+      # 5. Lance les tests unitaires
+      - name: Unit tests
+        run: npm test
+
+  # ──────────────────────────────────────────────
+  # JOB 2 : Build & Push Docker image
+  # ──────────────────────────────────────────────
+  # Ce job tourne UNIQUEMENT sur les push (pas sur les PR).
+  # Raison : une PR vient peut-être d'un fork externe,
+  # on ne lui donne pas accès aux secrets Docker Hub.
+  #
+  # Il dépend du job "test" : s'il échoue, pas de build.
+  # ──────────────────────────────────────────────
+  build:
+    name: Build & Push Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Génère automatiquement les tags et labels Docker
+      # selon la branche et le SHA du commit.
+      # Ex (main)    : axelperrin/stockalert:latest
+      #                axelperrin/stockalert:main-a1b2c3d
+      # Ex (staging) : axelperrin/stockalert:staging
+      #                axelperrin/stockalert:staging-a1b2c3d
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/stockalert
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/staging' }}
+            type=sha,prefix=${{ github.ref_name }}-,format=short
+
+      # Authentification sur Docker Hub avec les secrets GitHub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Build l'image à partir du Dockerfile et la push sur Docker Hub
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
